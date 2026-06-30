@@ -1,11 +1,13 @@
 {
   "name": "minecraft-server-starter",
-  "version": "1.0.0",
-  "description": "",
+  "version": "1.1.0",
+  "description": "DiscordのボタンからMinecraftサーバー(自宅PC)を起動/停止するBot",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node bot/discord_bot.js"
+    "start": "node index.js bot",
+    "start:bot": "node index.js bot",
+    "start:agent": "node index.js agent",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
@@ -20,7 +22,9 @@
   "homepage": "https://github.com/tshi-github/Minecraft-Server-Starter#readme",
   "dependencies": {
     "discord.js": "^14.26.4",
-    "express": "^5.2.1",
-    "wake_on_lan": "^1.0.0"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "rcon-client": "^4.2.5",
+    "ws": "^8.18.0"
   }
 }

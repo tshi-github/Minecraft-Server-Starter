@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const { spawn } = require('child_process');
 const WebSocket = require('ws');
 const { Rcon } = require('rcon-client');
@@ -139,7 +139,7 @@ async function stopAll() {
   // 3. PC シャットダウン
   console.log('PCをシャットダウンします');
   const { exec } = require('child_process');
-  exec('shutdown /s /t 10');
+  //exec('shutdown /s /t 10');
   stopInProgress = false;
 }
 
