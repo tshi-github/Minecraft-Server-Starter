@@ -1,24 +1,26 @@
 require('dotenv').config();
-const { exec } = require('child_process');
+const { spawn } = require('child_process');
 const WebSocket = require('ws');
 const { Rcon } = require('rcon-client');
 
 const config = {
-  BOT_WS_URL: process.env.BOT_WS_URL,
-  AGENT_TOKEN: process.env.AGENT_TOKEN,
-  MC_RCON_HOST: process.env.MC_RCON_HOST || '127.0.0.1',
-  MC_RCON_PORT: Number(process.env.MC_RCON_PORT || 25575),
-  MC_RCON_PASSWORD: process.env.MC_RCON_PASSWORD,
-  START_BAT_PATH: process.env.START_BAT_PATH,
-  START_BAT_CWD: process.env.START_BAT_CWD,
-  AUTO_SHUTDOWN_ENABLED: process.env.AUTO_SHUTDOWN_ENABLED === 'true',
-  AUTO_SHUTDOWN_HOUR: Number(process.env.AUTO_SHUTDOWN_HOUR || 6),
+  BOT_WS_URL:        process.env.BOT_WS_URL,
+  AGENT_TOKEN:       process.env.AGENT_TOKEN,
+  MC_RCON_HOST:      process.env.MC_RCON_HOST || '127.0.0.1',
+  MC_RCON_PORT:      Number(process.env.MC_RCON_PORT || 25575),
+  MC_RCON_PASSWORD:  process.env.MC_RCON_PASSWORD,
+  START_BAT_PATH:    process.env.START_BAT_PATH,   // Minecraftサーバー起動batの絶対パス
+  START_BAT_CWD:     process.env.START_BAT_CWD,    // batを実行する作業ディレクトリ
+  PLAYITGG_PATH:     process.env.PLAYITGG_PATH,     // playit.gg実行ファイルの絶対パス
+  PLAYITGG_CWD:      process.env.PLAYITGG_CWD,     // playit.ggの作業ディレクトリ
 };
 
-let ws = null;
+// ---- 子プロセス管理 ----
+let playitProcess = null;
+let mcProcess     = null;
+let ws            = null;
 
-// ---- Minecraftサーバーの状態確認(RCON) ----
-// 接続できればサーバー起動中、できなければ停止中とみなす(bat側の実装に依存しない方法)
+// ---- RCON: サーバー状態とプレイヤー一覧を取得 ----
 async function getServerStatus() {
   let rcon;
   try {
@@ -29,37 +31,87 @@ async function getServerStatus() {
       timeout: 3000,
     });
     const res = await rcon.send('list');
-    const match = res.match(/There are (\d+) of a max(?: of)? (\d+) players online/);
-    const players = match ? Number(match[1]) : 0;
+    // 例: "There are 2 of a max of 20 players online: Alice, Bob"
+    const match = res.match(/There are (\d+) of a max(?: of)? \d+ players online[:\.]?\s*(.*)/);
+    const count   = match ? Number(match[1]) : 0;
+    const players = (count > 0 && match[2]) ? match[2].split(',').map(s => s.trim()).filter(Boolean) : [];
     return { online: true, players };
-  } catch (err) {
-    return { online: false, players: 0 };
+  } catch {
+    return { online: false, players: [] };
   } finally {
-    if (rcon) {
-      try {
-        rcon.end();
-      } catch {
-        // noop
-      }
-    }
+    try { if (rcon) rcon.end(); } catch { /* noop */ }
   }
 }
 
 // ---- サーバー起動 ----
 function startServer() {
-  console.log('サーバー起動用batファイルを実行します:', config.START_BAT_PATH);
-  exec(`"${config.START_BAT_PATH}"`, { cwd: config.START_BAT_CWD }, (err) => {
-    if (err) console.error('batファイルの実行に失敗しました:', err);
+  if (mcProcess) {
+    console.log('サーバーはすでに起動中です');
+    return;
+  }
+  console.log('Minecraftサーバーを起動します:', config.START_BAT_PATH);
+  mcProcess = spawn('cmd.exe', ['/c', config.START_BAT_PATH], {
+    cwd: config.START_BAT_CWD,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  mcProcess.stdout.on('data', d => process.stdout.write('[MC] ' + d));
+  mcProcess.stderr.on('data', d => process.stderr.write('[MC] ' + d));
+  mcProcess.on('exit', () => {
+    console.log('Minecraftサーバープロセスが終了しました');
+    mcProcess = null;
+  });
+
+  // playit.gg が設定されていれば一緒に起動
+  startPlayit();
+}
+
+function startPlayit() {
+  if (!config.PLAYITGG_PATH || playitProcess) return;
+  console.log('playit.gg を起動します:', config.PLAYITGG_PATH);
+  playitProcess = spawn(config.PLAYITGG_PATH, [], {
+    cwd: config.PLAYITGG_CWD || undefined,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  playitProcess.stdout.on('data', d => process.stdout.write('[playit] ' + d));
+  playitProcess.stderr.on('data', d => process.stderr.write('[playit] ' + d));
+  playitProcess.on('exit', () => {
+    console.log('playit.gg プロセスが終了しました');
+    playitProcess = null;
   });
 }
 
-// ---- サーバー停止 & PC電源OFF ----
+// ---- 停止シーケンス ----
+// 順序: 1) playit.gg を q -> y で終了  2) Minecraftサーバーを RCON stop  3) PC シャットダウン
 let stopInProgress = false;
-async function stopServerAndShutdown() {
+async function stopAll() {
   if (stopInProgress) return;
   stopInProgress = true;
 
-  console.log('サーバーへstopコマンドを送信します');
+  // 1. playit.gg を q -> y で終了
+  if (playitProcess) {
+    console.log('playit.gg を停止します (q -> y)');
+    try {
+      playitProcess.stdin.write('q\n');
+      await new Promise(r => setTimeout(r, 1000));
+      playitProcess.stdin.write('y\n');
+      // プロセス終了を最大10秒待つ
+      await Promise.race([
+        new Promise(r => playitProcess.once('exit', r)),
+        new Promise(r => setTimeout(r, 10000)),
+      ]);
+    } catch (err) {
+      console.error('playit.gg 停止中にエラー:', err.message);
+    }
+    // まだ生きていれば強制終了
+    if (playitProcess) {
+      try { playitProcess.kill(); } catch { /* noop */ }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    console.log('playit.gg を停止しました');
+  }
+
+  // 2. Minecraftサーバーを RCON stop
+  console.log('Minecraftサーバーに stop を送信します');
   try {
     const rcon = await Rcon.connect({
       host: config.MC_RCON_HOST,
@@ -70,77 +122,57 @@ async function stopServerAndShutdown() {
     await rcon.send('stop');
     rcon.end();
   } catch (err) {
-    console.error('RCONでのstopコマンド送信に失敗しました(既に停止している可能性があります):', err.message);
+    console.error('RCON stop に失敗しました:', err.message);
+    // RCONが繋がらない場合はプロセスに直接 Ctrl+C (SIGINT)
+    if (mcProcess) {
+      try { mcProcess.kill('SIGINT'); } catch { /* noop */ }
+    }
   }
 
-  // サーバープロセスが完全に終了する(RCONに接続できなくなる)まで待つ。
-  // ワールド保存の時間を確保するため最大5分待つ
-  const maxWaitMs = 5 * 60 * 1000;
-  const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
-    await new Promise((r) => setTimeout(r, 5000));
-    const status = await getServerStatus();
-    if (!status.online) break;
+  // サーバープロセスが終了するまで最大5分待つ
+  const deadline = Date.now() + 5 * 60 * 1000;
+  while (mcProcess && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 5000));
   }
+  console.log('Minecraftサーバーが停止しました');
 
+  // 3. PC シャットダウン
   console.log('PCをシャットダウンします');
+  const { exec } = require('child_process');
   exec('shutdown /s /t 10');
   stopInProgress = false;
 }
 
-// ---- Renderのbotへ常時接続するWebSocketクライアント ----
+// ---- Bot との WebSocket 常時接続 ----
 function connect() {
   ws = new WebSocket(`${config.BOT_WS_URL}?token=${config.AGENT_TOKEN}`);
 
-  ws.on('open', () => {
-    console.log('Botに接続しました');
-  });
+  ws.on('open', () => console.log('Bot に接続しました'));
 
   ws.on('message', (raw) => {
     let data;
-    try {
-      data = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
-
-    if (data.type === 'start_server') {
-      startServer();
-    } else if (data.type === 'stop_server') {
-      stopServerAndShutdown();
-    }
+    try { data = JSON.parse(raw.toString()); } catch { return; }
+    if (data.type === 'start_server') startServer();
+    if (data.type === 'stop_server')  stopAll();
   });
 
   ws.on('close', () => {
-    console.log('Botとの接続が切れました。5秒後に再接続します');
+    console.log('Bot との接続が切れました。5秒後に再接続します');
     setTimeout(connect, 5000);
   });
 
-  ws.on('error', (err) => {
-    console.error('WebSocketエラー:', err.message);
-  });
+  ws.on('error', err => console.error('WebSocket エラー:', err.message));
 }
 
-// ---- ハートビート送信(サーバー状態をbotに伝える) ----
+// ---- ハートビート: 20秒ごとに状態を Bot に送る ----
 setInterval(async () => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const status = await getServerStatus();
-  ws.send(JSON.stringify({ type: 'heartbeat', mcServerOnline: status.online }));
+  ws.send(JSON.stringify({
+    type: 'heartbeat',
+    mcServerOnline: status.online,
+    players: status.players,
+  }));
 }, 20000);
-
-// ---- 自動シャットダウン監視(任意機能) ----
-// 指定した時刻になった時点でプレイヤーが0人なら自動的にサーバー停止&PC電源OFFする
-if (config.AUTO_SHUTDOWN_ENABLED) {
-  setInterval(async () => {
-    const now = new Date();
-    if (now.getHours() !== config.AUTO_SHUTDOWN_HOUR || now.getMinutes() >= 5) return;
-
-    const status = await getServerStatus();
-    if (status.online && status.players === 0) {
-      console.log(`${config.AUTO_SHUTDOWN_HOUR}時時点でプレイヤーが0人のため自動シャットダウンします`);
-      await stopServerAndShutdown();
-    }
-  }, 5 * 60 * 1000);
-}
 
 connect();
