@@ -1,6 +1,5 @@
 @echo off
-REM 管理者権限の「コマンドプロンプト」または「PowerShell」で実行してください
-REM (右クリック→「管理者として実行」したcmdの中でこのbatを実行する)
+REM Run this as Administrator (right-click -> "Run as administrator")
 
 set TASK_NAME=MinecraftServerStarterAgent
 set SCRIPT_DIR=%~dp0
@@ -8,12 +7,11 @@ set SCRIPT_DIR=%~dp0
 schtasks /create /tn "%TASK_NAME%" /tr "\"%SCRIPT_DIR%run_agent.bat\"" /sc onstart /ru SYSTEM /rl highest /f
 
 echo.
-echo タスク "%TASK_NAME%" を登録しました。
-echo PCを再起動すると、ログインしなくても自動でエージェントが起動します。
-echo ログは %SCRIPT_DIR%agent.log に出力されます。
+echo Task "%TASK_NAME%" has been registered.
+echo The agent will now start automatically whenever this PC boots, even without logging in.
+echo Logs are written to %SCRIPT_DIR%agent.log
 echo.
-echo もし起動しない場合は、SYSTEM権限から node コマンドが見つからない可能性があります。
-echo その場合は run_agent.bat の「node」の部分を、コマンドプロンプトで
-echo   where node
-echo を実行して表示されるフルパス(例: "C:\Program Files\nodejs\node.exe")に書き換えてください。
+echo If the agent does not start, the SYSTEM account may not be able to find "node".
+echo In that case, run "where node" in a command prompt to get the full path,
+echo then replace "node" in run_agent.bat with that full path (e.g. "C:\Program Files\nodejs\node.exe").
 pause
