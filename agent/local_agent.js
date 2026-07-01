@@ -61,23 +61,6 @@ function startServer() {
     mcProcess = null;
   });
 
-  // playit.gg が設定されていれば一緒に起動
-  startPlayit();
-}
-
-function startPlayit() {
-  if (!config.PLAYITGG_PATH || playitProcess) return;
-  console.log('playit.gg を起動します:', config.PLAYITGG_PATH);
-  playitProcess = spawn(config.PLAYITGG_PATH, [], {
-    cwd: config.PLAYITGG_CWD || undefined,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  playitProcess.stdout.on('data', d => process.stdout.write('[playit] ' + d));
-  playitProcess.stderr.on('data', d => process.stderr.write('[playit] ' + d));
-  playitProcess.on('exit', () => {
-    console.log('playit.gg プロセスが終了しました');
-    playitProcess = null;
-  });
 }
 
 // ---- 停止シーケンス ----
