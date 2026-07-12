@@ -50,7 +50,7 @@ function buildPanel() {
 
   const stopButton = new ButtonBuilder()
     .setCustomId('stop')
-    .setLabel('サーバー停止 & シャットダウン')
+    .setLabel('サーバー停止')
     .setStyle(ButtonStyle.Danger)
     .setDisabled(!pcOnline || !state.mcServerOnline);
 
@@ -127,7 +127,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
     state.agentSocket.send(JSON.stringify({ type: 'stop_server' }));
-    await interaction.reply({ content: '停止シーケンスを開始しました(playit.gg → サーバー停止の順に行います)。', ephemeral: true });
+    await interaction.reply({ content: 'サーバーとplayit.ggの停止を開始しました。', ephemeral: true });
   }
 });
 
