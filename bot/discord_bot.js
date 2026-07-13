@@ -12,59 +12,44 @@ const {
 
 const config = require('./config');
 
-// ---- 状態管理 ----
 const state = {
-  agentSocket: null,       // ローカルエージェントとのWebSocket
-  mcServerOnline: false,   // Minecraftサーバーの起動状態
-  players: [],             // 現在のプレイヤー一覧
-  controlMessage: null,    // 操作パネルのDiscordメッセージ
-  playerListMessage: null, // プレイヤー一覧のDiscordメッセージ
+  agentSocket: null,
+  mcServerOnline: false,
+  players: [],
+  controlMessage: null,
+  playerListMessage: null,
 };
 
 function isPcOnline() {
   return state.agentSocket !== null && state.agentSocket.readyState === WebSocket.OPEN;
 }
 
-// ---- 操作パネル(コントロール用チャンネル) ----
 function buildPanel() {
   const pcOnline = isPcOnline();
-
   const embed = new EmbedBuilder()
     .setTitle('Minecraft Server Controls')
     .setColor(state.mcServerOnline ? 0x57f287 : pcOnline ? 0xfee75c : 0x99aab5)
     .addFields(
-      { name: 'PC',       value: pcOnline          ? '🟢 起動中' : '⚪ 停止中', inline: true },
+      { name: 'PC',       value: pcOnline             ? '🟢 起動中' : '⚪ 停止中', inline: true },
       { name: 'サーバー', value: state.mcServerOnline ? '🟢 起動中' : '⚪ 停止中', inline: true }
     );
+  if (!pcOnline) embed.setFooter({ text: 'PCが起動していません。PCを手動で起動してください。' });
 
-  if (!pcOnline) {
-    embed.setFooter({ text: 'PCが起動していません。PCを手動で起動してください。' });
-  }
-
-  // PCが起動していない場合はすべてのボタンを無効化
   const startButton = new ButtonBuilder()
-    .setCustomId('start')
-    .setLabel('サーバー起動')
-    .setStyle(ButtonStyle.Primary)
+    .setCustomId('start').setLabel('サーバー起動').setStyle(ButtonStyle.Primary)
     .setDisabled(!pcOnline || state.mcServerOnline);
-
   const stopButton = new ButtonBuilder()
-    .setCustomId('stop')
-    .setLabel('サーバー停止')
-    .setStyle(ButtonStyle.Danger)
+    .setCustomId('stop').setLabel('サーバー停止').setStyle(ButtonStyle.Danger)
     .setDisabled(!pcOnline || !state.mcServerOnline);
 
-  const row = new ActionRowBuilder().addComponents(startButton, stopButton);
-  return { embeds: [embed], components: [row] };
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(startButton, stopButton)] };
 }
 
-// ---- プレイヤー一覧(専用チャンネル) ----
 function buildPlayerList() {
   const embed = new EmbedBuilder()
     .setTitle('🎮 現在のプレイヤー')
     .setColor(state.players.length > 0 ? 0x57f287 : 0x99aab5)
     .setTimestamp();
-
   if (!isPcOnline() || !state.mcServerOnline) {
     embed.setDescription('サーバーは現在停止中です。');
   } else if (state.players.length === 0) {
@@ -73,7 +58,6 @@ function buildPlayerList() {
     embed.setDescription(state.players.map(p => `• ${p}`).join('\n'));
     embed.setFooter({ text: `${state.players.length}人 オンライン` });
   }
-
   return { embeds: [embed] };
 }
 
@@ -91,17 +75,38 @@ async function refreshPlayerList() {
   }
 }
 
-// ---- Discord Bot ----
+// 起動時にピン留めメッセージを再利用する。
+// なければ新規送信してピン留め→以降は編集のみで通知が飛ばない。
+async function findOrSendPinnedMessage(channel, content) {
+  try {
+    const pinned = await channel.messages.fetchPinned();
+    const existing = pinned.find(m => m.author.id === client.user.id);
+    if (existing) {
+      console.log(`ピン留めメッセージを再利用します (channel: ${channel.id})`);
+      await existing.edit(content);
+      return existing;
+    }
+  } catch (err) {
+    console.error('ピン留めメッセージの取得に失敗しました:', err.message);
+  }
+  console.log(`新規メッセージを送信してピン留めします (channel: ${channel.id})`);
+  const msg = await channel.send(content);
+  try { await msg.pin(); } catch (err) {
+    console.error('ピン留めに失敗しました:', err.message);
+  }
+  return msg;
+}
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
   const controlChannel = await client.channels.fetch(config.CHANNEL_ID);
-  state.controlMessage = await controlChannel.send(buildPanel());
+  state.controlMessage = await findOrSendPinnedMessage(controlChannel, buildPanel());
 
   const playerChannel = await client.channels.fetch(config.PLAYER_LIST_CHANNEL_ID);
-  state.playerListMessage = await playerChannel.send(buildPlayerList());
+  state.playerListMessage = await findOrSendPinnedMessage(playerChannel, buildPlayerList());
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -133,7 +138,6 @@ client.on('interactionCreate', async (interaction) => {
 
 client.login(config.DISCORD_TOKEN);
 
-// ---- HTTPサーバー(Render keep-alive) + WebSocketサーバー(エージェント用) ----
 const app = express();
 app.get('/', (req, res) => res.send('Minecraft-Server-Starter bot is alive.'));
 
@@ -142,10 +146,7 @@ const wss = new WebSocketServer({ server: httpServer, path: '/agent' });
 
 wss.on('connection', (ws, req) => {
   const token = new URL(req.url, 'http://localhost').searchParams.get('token');
-  if (token !== config.AGENT_TOKEN) {
-    ws.close(4001, 'unauthorized');
-    return;
-  }
+  if (token !== config.AGENT_TOKEN) { ws.close(4001, 'unauthorized'); return; }
 
   console.log('ローカルエージェントが接続しました');
   state.agentSocket = ws;
@@ -154,9 +155,8 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let data;
     try { data = JSON.parse(raw.toString()); } catch { return; }
-
     if (data.type === 'heartbeat') {
-      const serverChanged = state.mcServerOnline !== Boolean(data.mcServerOnline);
+      const serverChanged  = state.mcServerOnline !== Boolean(data.mcServerOnline);
       const playersChanged = JSON.stringify(state.players) !== JSON.stringify(data.players || []);
       state.mcServerOnline = Boolean(data.mcServerOnline);
       state.players = Array.isArray(data.players) ? data.players : [];
