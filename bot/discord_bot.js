@@ -77,23 +77,35 @@ async function refreshPlayerList() {
 
 // 起動時にピン留めメッセージを再利用する。
 // なければ新規送信してピン留め→以降は編集のみで通知が飛ばない。
-async function findOrSendPinnedMessage(channel, content) {
-  try {
-    const pinned = await channel.messages.fetchPinned();
-    const existing = pinned.find(m => m.author.id === client.user.id);
-    if (existing) {
-      console.log(`ピン留めメッセージを再利用します (channel: ${channel.id})`);
-      await existing.edit(content);
-      return existing;
+const fs = require('fs');
+const MESSAGE_IDS_PATH = require('path').join(__dirname, '..', 'message_ids.json');
+
+function loadIds() {
+  try { return JSON.parse(fs.readFileSync(MESSAGE_IDS_PATH, 'utf8')); }
+  catch { return {}; }
+}
+
+function saveId(key, id) {
+  const ids = loadIds();
+  ids[key] = id;
+  fs.writeFileSync(MESSAGE_IDS_PATH, JSON.stringify(ids));
+}
+
+async function getOrCreateMessage(channel, content, key) {
+  const ids = loadIds();
+  if (ids[key]) {
+    try {
+      const msg = await channel.messages.fetch(ids[key]);
+      await msg.edit(content);
+      console.log(`既存メッセージを再利用します (${key})`);
+      return msg;
+    } catch {
+      console.log(`メッセージが見つかりません。新規送信します (${key})`);
     }
-  } catch (err) {
-    console.error('ピン留めメッセージの取得に失敗しました:', err.message);
   }
-  console.log(`新規メッセージを送信してピン留めします (channel: ${channel.id})`);
   const msg = await channel.send(content);
-  try { await msg.pin(); } catch (err) {
-    console.error('ピン留めに失敗しました:', err.message);
-  }
+  saveId(key, msg.id);
+  console.log(`新規メッセージを送信しました (${key}: ${msg.id})`);
   return msg;
 }
 
@@ -101,12 +113,10 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-
   const controlChannel = await client.channels.fetch(config.CHANNEL_ID);
-  state.controlMessage = await findOrSendPinnedMessage(controlChannel, buildPanel());
-
+  state.controlMessage = await getOrCreateMessage(controlChannel, buildPanel(), 'control');
   const playerChannel = await client.channels.fetch(config.PLAYER_LIST_CHANNEL_ID);
-  state.playerListMessage = await findOrSendPinnedMessage(playerChannel, buildPlayerList());
+  state.playerListMessage = await getOrCreateMessage(playerChannel, buildPlayerList(), 'playerList');
 });
 
 client.on('interactionCreate', async (interaction) => {
